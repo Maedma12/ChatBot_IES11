@@ -24,8 +24,8 @@ from .bot import (
 )
 from .config import (
     AVISO_RESPUESTA_IA, CAMPOS_CONTACTO, COMANDOS_MENU, COMANDOS_VOLVER, CONFIG_DEFECTO, ID_RAIZ, LLM_MAX_POR_SESION,
-    MAX_MENSAJES_HISTORIAL, MAX_PREGUNTAS_FRECUENTES, OPCIONES_VISIBLES, RUTA_LOGO, TITULO_PAGINA,
-    ahora_local, entero, leer_ajuste, modelos_llm,
+    MAX_CHARS_LOG, MAX_MENSAJES_HISTORIAL, MAX_PREGUNTAS_FRECUENTES, OPCIONES_VISIBLES, RUTA_LOGO, TITULO_PAGINA,
+    ahora_local, entero, es_fallo_ia, leer_ajuste, modelos_llm,
 )
 from .datos import cargar_datos
 from .estilos import ESTILOS
@@ -485,7 +485,7 @@ def _dibujar_historial(
                     valoracion = st.session_state[k]
                     if valoracion is not None and not st.session_state.mensajes[index].get("feedback_enviado"):
                         tipo_feedback = "LIKE" if valoracion == 1 else "DISLIKE"
-                        texto_respuesta = st.session_state.mensajes[index]["content"].replace("\n", " ")[:200]
+                        texto_respuesta = st.session_state.mensajes[index]["content"].replace("\n", " ")[:MAX_CHARS_LOG]
                         
                         from .datos import actualizar_feedback_en_background
                         actualizar_feedback_en_background(
@@ -568,7 +568,7 @@ def _atender_con_ia(resp: Respuesta, historial: List[Dict[str, Any]], arbol: Arb
                 valoracion = st.session_state.get(k)
                 if valoracion is not None and not st.session_state.mensajes[idx].get("feedback_enviado"):
                     tipo = "LIKE" if valoracion == 1 else "DISLIKE"
-                    texto_resp = st.session_state.mensajes[idx]["content"].replace("\n", " ")[:200]
+                    texto_resp = st.session_state.mensajes[idx]["content"].replace("\n", " ")[:MAX_CHARS_LOG]
                     from .datos import actualizar_feedback_en_background
                     actualizar_feedback_en_background(
                         leer_ajuste("sheet_id"), st.session_state.id_sesion, texto_resp, tipo
@@ -583,8 +583,8 @@ def _atender_con_ia(resp: Respuesta, historial: List[Dict[str, Any]], arbol: Arb
             if sheet_id:
                 texto_limpio = texto.replace("\n", " ")
                 
-                # OJO: La frase tiene que estar TODA en minúsculas para que coincida con .lower()
-                fallo_ia = "no tengo esa información" in texto_limpio.lower()
+                # Detecta varias formas de decir "no tengo el dato" (ver FRASES_FALLO_IA en config.py)
+                fallo_ia = es_fallo_ia(texto_limpio)
                 
                 fila_log = [
                     ahora_local().strftime("%Y-%m-%d %H:%M:%S"),
@@ -593,7 +593,7 @@ def _atender_con_ia(resp: Respuesta, historial: List[Dict[str, Any]], arbol: Arb
                     resp.nodo,
                     "SI",
                     "SI" if fallo_ia else "NO", 
-                    texto_limpio[:200],
+                    texto_limpio[:MAX_CHARS_LOG],
                     "",
                     origen,        # Columna I del Sheets: encabezado "origen"
                 ]
@@ -828,7 +828,7 @@ def main() -> None:
                     resp.nodo,
                     "NO",
                     "SI" if fallo_lexico else "NO",  # <-- Ahora SÍ va a marcar el error
-                    texto_respuesta[:200],
+                    texto_respuesta[:MAX_CHARS_LOG],
                     "",
                     origen,        # Columna I del Sheets: encabezado "origen"
                 ]

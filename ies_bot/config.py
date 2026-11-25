@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+MAX_CHARS_LOG = 2000               # largo máximo de la respuesta guardada en Logs_Bot
 CACHE_TTL_SEGUNDOS = 300          
 ID_RAIZ = "ROOT"                  
 MAX_MENSAJES_HISTORIAL = 100      
@@ -158,6 +159,21 @@ CONFIG_DEFECTO: Dict[str, str] = {
     "horarios": "Lunes a viernes de 8 a 23 hs",
     "telefono": "3886014588",
 }
+
+# Frases que indican que el bot NO tenía el dato (se usan para marcar hubo_fallo = SI en las respuestas de IA).
+FRASES_FALLO_IA = (
+    "no tengo esa informacion", "no tengo informacion", "no cuento con esa informacion",
+    "no cuento con informacion", "no dispongo de esa informacion", "no dispongo de informacion",
+    "no tengo ese dato", "no tengo datos", "no figura en mi base", "no esta en mi base",
+    "acercate a secretaria",
+)
+
+def es_fallo_ia(texto: str) -> bool:
+    """True si la respuesta de la IA dice que le falta información (sin importar tildes ni mayúsculas)."""
+    import unicodedata
+    base = unicodedata.normalize("NFD", texto.lower())
+    base = "".join(ch for ch in base if unicodedata.category(ch) != "Mn")
+    return any(frase in base for frase in FRASES_FALLO_IA)
 
 def leer_ajuste(clave: str, defecto: Optional[str] = None) -> Optional[str]:
     try:

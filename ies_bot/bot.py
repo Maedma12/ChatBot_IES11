@@ -65,6 +65,29 @@ def auditar_nodos(nodos: List[Dict[str, Any]]) -> List[str]:
             problemas.append(f"opción repetida: «{op}» dentro de «{padre}».")
         if padre != ID_RAIZ and padre not in arbol.por_id:
             problemas.append(f"padre_id inexistente: «{padre}» (sus filas quedan inalcanzables).")
+
+    # Filas a las que no se llega desde el menú principal por un ciclo (ej. padre_id = id).
+    alcanzables, pila = set(), [ID_RAIZ]
+    while pila:
+        for hijo in arbol.hijos.get(pila.pop(), []):
+            if hijo["id"] not in alcanzables:
+                alcanzables.add(hijo["id"])
+                pila.append(hijo["id"])
+    en_ciclo = [i for i, n in arbol.por_id.items() if i not in alcanzables and n["padre_id"] in arbol.por_id]
+    if en_ciclo:
+        problemas.append("filas inalcanzables por un ciclo en padre_id (ej. una fila que es su propio "
+                         f"padre): {', '.join(en_ciclo)}.")
+
+    # ids con puntos ("5.10.1") cuyo padre_id no coincide con el prefijo del id. Suele pasar cuando
+    # Google Sheets convierte un texto como "5.10" en el número 5,1.
+    for nodo in arbol.por_id.values():
+        if "." in nodo["id"]:
+            esperado = nodo["id"].rsplit(".", 1)[0]
+            if esperado in arbol.por_id and nodo["padre_id"] != esperado:
+                problemas.append(
+                    f"posible padre_id incorrecto en «{nodo['id']}»: dice «{nodo['padre_id']}» pero por "
+                    f"su id debería colgar de «{esperado}» (¿Sheets lo convirtió en número?)."
+                )
     return problemas
 
 
@@ -137,6 +160,42 @@ def puntuar_opciones(texto: str, arbol: Arbol) -> List[Tuple[int, Dict[str, Any]
         resultados.append((puntaje, nodo))
     resultados.sort(key=lambda r: (-r[0], _clave_orden(r[1])))
     return resultados
+
+
+def _profundidad(nodo: Dict[str, Any], arbol: Arbol) -> int:
+    """Nivel del nodo en el menú (1 = menú principal)."""
+    return len(ruta_nodo(nodo["id"], arbol))
+
+
+def tema_ganador(puntuados: List[Tuple[int, Dict[str, Any]]], arbol: Arbol) -> Optional[Dict[str, Any]]:
+    """
+    Desempata cuando un TEMA entero coincide con la consulta.
+
+    Ejemplo: "pasantías" coincide con «Pasantías y Empleo» y con sus tres hijas (9.1, 9.2, 9.3). Las
+    cuatro empatan en puntaje, pero no compiten entre sí: son un mismo tema del menú. Entre los
+    nodos que empatan en el primer puesto se busca uno que sea ANCESTRO de otros (el tema); si al
+    menos dos tercios de los empatados cuelgan de él (o son él), se devuelve para abrirlo: el alumno
+    ve la descripción del tema y sus hijas como opciones. Si no hay un tema claro devuelve None y el
+    bot sigue con sus sugerencias de siempre. Ante la duda NO decide: es una regla conservadora.
+    """
+    if len(puntuados) < 2 or puntuados[0][0] < PUNTAJE_DIRECTO:
+        return None
+    empatados = [n for p, n in puntuados if p == puntuados[0][0]]
+    ids = {n["id"] for n in empatados}
+    cobertura: Dict[str, int] = {}                 # tema candidato → cuántos empatados cuelgan de él
+    for nodo in empatados:
+        actual, visto = nodo["padre_id"], set()
+        while actual in arbol.por_id and actual not in visto:
+            visto.add(actual)
+            if actual in ids:
+                cobertura[actual] = cobertura.get(actual, 0) + 1
+            actual = arbol.por_id[actual]["padre_id"]
+    if not cobertura:
+        return None
+    tema = max(cobertura, key=lambda i: (cobertura[i], -_profundidad(arbol.por_id[i], arbol)))
+    dentro = 1 + cobertura[tema]
+    fuera = len(empatados) - dentro
+    return arbol.por_id[tema] if dentro >= 2 * fuera else None
 
 
 def buscar_opciones(texto: str, arbol: Arbol, limite: int = MAX_SUGERENCIAS) -> List[Dict[str, Any]]:
@@ -256,14 +315,22 @@ def _respuesta_fallo(texto: str, nodo_actual: str, config: Dict[str, str], fallo
             texto += "\n\nSi no encontrás lo que buscás, consultá directamente en secretaría."
     return Respuesta(texto, nodo_actual, fallo=True)
 
+# Con un EMPATE real entre temas distintos (sin tema ganador) se le pasa la consulta a la IA aunque
+# tenga 1 o 2 palabras, con los empatados como candidatos. Si la IA no está disponible, se agotó la
+# cuota o falla, la interfaz muestra las sugerencias de siempre.
+MIN_PALABRAS_IA_EMPATE = 1
+MAX_CANDIDATOS_EMPATE = 8
+
+
 def _con_ia(
     resp: Respuesta, texto: str, palabras: List[str],
     puntuados: List[Tuple[int, Dict[str, Any]]], llm_disponible: bool,
+    min_palabras: int = LLM_MIN_PALABRAS, max_candidatos: int = LLM_CANDIDATOS,
 ) -> Respuesta:
-    if llm_disponible and len(palabras) >= LLM_MIN_PALABRAS:
+    if llm_disponible and len(palabras) >= min_palabras:
         resp.usar_llm = True
         resp.consulta_llm = anonimizar_consulta(texto)
-        resp.candidatos = [n["id"] for _, n in puntuados[:LLM_CANDIDATOS]]
+        resp.candidatos = [n["id"] for _, n in puntuados[:max_candidatos]]
     return resp
 
 
@@ -312,6 +379,16 @@ def procesar_mensaje(
         if por_id is not None:
             return _abrir_opcion(por_id, nodo_actual, arbol, config, salto=True)
 
+    # Título escrito tal cual (ej. "Beca Progresar"): se abre ese nodo sin pasar por la búsqueda.
+    # Si el mismo título se repite (ej. "Materias y Plan de Estudios" en cada carrera), se elige el
+    # que cuelga del menú donde está el alumno; si sigue habiendo duda, decide la búsqueda.
+    if not t.isdigit():
+        iguales = [n for n in arbol.por_id.values() if normalizar_texto(n["titulo"]) == t]
+        if len(iguales) > 1:
+            iguales = [n for n in iguales if n["padre_id"] == nodo_actual]
+        if len(iguales) == 1:
+            return _abrir_opcion(iguales[0], nodo_actual, arbol, config, salto=True)
+
     if numero is not None:
         validas = ", ".join(h["opcion"] for h in hijos)
         aviso = (
@@ -348,9 +425,19 @@ def procesar_mensaje(
             resp.texto = "Esto es lo que encontré 👇\n\n" + resp.texto
             return resp
 
+        # Empate entre un tema y sus propias hijas (ej. "pasantías"): se abre el tema.
+        tema = tema_ganador(puntuados, arbol)
+        if tema is not None:
+            resp = _abrir_opcion(tema, nodo_actual, arbol, config, salto=True)
+            resp.texto = "Esto es lo que encontré 👇\n\n" + resp.texto
+            return resp
+
         sugerencias = [(n["id"], n["titulo"]) for _, n in puntuados[:MAX_SUGERENCIAS]]
         resp = Respuesta(config["mensaje_sugerencias"], nodo_actual, sugerencias=sugerencias)
-        return _con_ia(resp, texto, palabras, puntuados, llm_disponible)
+        empatados = sum(1 for p, _ in puntuados if p == puntuados[0][0])
+        return _con_ia(resp, texto, palabras, puntuados, llm_disponible,
+                       min_palabras=MIN_PALABRAS_IA_EMPATE,
+                       max_candidatos=min(max(LLM_CANDIDATOS, empatados), MAX_CANDIDATOS_EMPATE))
 
     resp = _respuesta_fallo(config["mensaje_error"], nodo_actual, config, fallos_previos)
     return _con_ia(resp, texto, palabras, puntuados, llm_disponible)
